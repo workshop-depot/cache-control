@@ -5,58 +5,86 @@ import (
 	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi"
 	"github.com/stretchr/testify/assert"
 )
 
-var _ http.ResponseWriter = &ccResponseWriter{}
+var fs = http.Dir(`./assets`)
 
-// files = map[url-path]content
-func createMux(files map[string]string, options ...Option) *chi.Mux {
+func createMux(options ...Option) *chi.Mux {
 	rt := chi.NewRouter()
 	rt.Route("/assets/*", func(rt chi.Router) {
-		rt.Use(CacheControl(options...))
-		rt.Get("/*", func(rw http.ResponseWriter, rq *http.Request) {
-			f, ok := files[rq.URL.Path]
-			if !ok {
-				rw.WriteHeader(http.StatusNotFound)
-				rw.Write([]byte("404 for test: " + rq.URL.Path))
-				return
-			}
-			rw.Write([]byte(f))
-		})
+		options = append(options, StripPrefix("/assets"))
+		rt.Use(CacheControl(fs, options...))
+		rt.Get("/*", http.StripPrefix("/assets", http.FileServer(fs)).ServeHTTP)
 	})
+
 	return rt
 }
 
 const goInternalETagHeader = "Etag" // it's case-insensitive; but why the change?
 
-func TestETag1(t *testing.T) {
-	DevelopmentMode()
-
+// etags gets calculated on first call
+func TestETag1WarmUp(t *testing.T) {
 	assert := assert.New(t)
 
-	files := map[string]string{
-		"/assets/js/app.js":              "var v = 66",
-		"/assets/js/vue.js":              "var vue = 66",
-		"/assets/css/framework.css":      "body { direction: rtl; }",
-		"/assets/css/customizations.css": "body { x: 10; }",
-		"/assets/css/lang.css":           "body { y: 10; }",
-		"/assets/css/app.css":            "body { z: 10; }",
+	files := []string{
+		"/assets/js/app.js",
+		"/assets/vue/vue.min.js",
+		"/assets/axios/axios.min.js",
+		"/assets/bulma/css/bulma.rtl.css",
 	}
 
-	mux := createMux(files)
+	mux := createMux()
 
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	for k, vf := range files {
+	for _, vf := range files {
 		var u bytes.Buffer
 		u.WriteString(string(srv.URL))
-		u.WriteString(k)
+		u.WriteString(vf)
+
+		// 1
+		res, err := http.Get(u.String())
+		assert.NoError(err)
+		if res != nil {
+			defer res.Body.Close()
+		}
+	}
+
+WAIT_FOR_ETAG:
+	for _, vf := range files {
+		_, ok := kv.Get(vf)
+		if !ok {
+			time.Sleep(time.Millisecond * 100)
+			goto WAIT_FOR_ETAG
+		}
+	}
+}
+
+func TestETag1(t *testing.T) {
+	assert := assert.New(t)
+
+	files := []string{
+		"/assets/js/app.js",
+		"/assets/vue/vue.min.js",
+		"/assets/axios/axios.min.js",
+		"/assets/bulma/css/bulma.rtl.css",
+	}
+
+	mux := createMux()
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	for _, vf := range files {
+		var u bytes.Buffer
+		u.WriteString(string(srv.URL))
+		u.WriteString(vf)
 
 		// 1
 		res, err := http.Get(u.String())
@@ -67,7 +95,7 @@ func TestETag1(t *testing.T) {
 
 		b, err := ioutil.ReadAll(res.Body)
 		assert.NoError(err)
-		assert.Equal("public, max-age=2419200", res.Header[cachecontrolHeaderServer][0])
+		assert.Equal("public, max-age=2419200", res.Header[cacheControlServer][0])
 		foundETag := res.Header[goInternalETagHeader][0]
 		assert.Equal(http.StatusOK, res.StatusCode)
 
@@ -83,90 +111,9 @@ func TestETag1(t *testing.T) {
 
 		b, err = ioutil.ReadAll(res.Body)
 		assert.NoError(err)
-		assert.Equal("public, max-age=2419200", res.Header[cachecontrolHeaderServer][0])
+		assert.Equal("public, max-age=2419200", res.Header[cacheControlServer][0])
 		assert.Equal(foundETag, res.Header[goInternalETagHeader][0])
 		assert.True(len(b) == 0)
 		assert.Equal(http.StatusNotModified, res.StatusCode)
-
-		// 3
-		files[k] = "N/A"
-		res, err = http.Get(u.String())
-		assert.NoError(err)
-		if res != nil {
-			defer res.Body.Close()
-		}
-
-		b, err = ioutil.ReadAll(res.Body)
-		assert.NoError(err)
-		assert.Equal("public, max-age=2419200", res.Header[cachecontrolHeaderServer][0])
-		assert.Equal(foundETag, res.Header[goInternalETagHeader][0])
-		assert.True(!bytes.Contains(b, []byte(vf)))
-	}
-}
-
-func TestETag2(t *testing.T) {
-	DevelopmentMode()
-	assert := assert.New(t)
-
-	files := map[string]string{
-		"/assets/js/app.js":              "var v = 66",
-		"/assets/js/vue.js":              "var vue = 66",
-		"/assets/css/framework.css":      "body { direction: rtl; }",
-		"/assets/css/customizations.css": "body { x: 10; }",
-		"/assets/css/lang.css":           "body { y: 10; }",
-		"/assets/css/app.css":            "body { z: 10; }",
-	}
-
-	mux := createMux(files, MaxAge(1), IsPrivate(true), IsWeak(true))
-
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	for k, vf := range files {
-		var u bytes.Buffer
-		u.WriteString(string(srv.URL))
-		u.WriteString(k)
-
-		// 1
-		res, err := http.Get(u.String())
-		assert.NoError(err)
-		if res != nil {
-			defer res.Body.Close()
-		}
-
-		b, err := ioutil.ReadAll(res.Body)
-		assert.NoError(err)
-		assert.Equal("private, max-age=1", res.Header[cachecontrolHeaderServer][0])
-		foundETag := res.Header[goInternalETagHeader][0]
-		assert.True(strings.HasPrefix(foundETag, "W/"), foundETag)
-
-		// time.Sleep(time.Millisecond * 1100)
-
-		// 2
-		res, err = http.Get(u.String())
-		assert.NoError(err)
-		if res != nil {
-			defer res.Body.Close()
-		}
-
-		b, err = ioutil.ReadAll(res.Body)
-		assert.NoError(err)
-		assert.Equal("private, max-age=1", res.Header[cachecontrolHeaderServer][0])
-		assert.Equal(foundETag, res.Header[goInternalETagHeader][0])
-		assert.True(bytes.Contains(b, []byte(vf)))
-
-		// 3
-		files[k] = "N/A"
-		res, err = http.Get(u.String())
-		assert.NoError(err)
-		if res != nil {
-			defer res.Body.Close()
-		}
-
-		b, err = ioutil.ReadAll(res.Body)
-		assert.NoError(err)
-		assert.Equal("private, max-age=1", res.Header[cachecontrolHeaderServer][0])
-		assert.Equal(foundETag, res.Header[goInternalETagHeader][0])
-		assert.True(!bytes.Contains(b, []byte(vf)))
 	}
 }
