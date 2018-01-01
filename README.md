@@ -20,5 +20,5 @@ rt.Route("/assets/*", func(rt chi.Router) {
 
 # TODO
 
-* etag recauculation strategy: currently there is a dev mode, and in production etag won't get recalculated unless max-age passed (monitoring? using last-modified provided internally?)
+* [dirwatch](https://github.com/dc0d/dirwatch) can be used for watching directories of assets (next).
 * more tests
