@@ -22,7 +22,7 @@ const (
 )
 
 var (
-	kv            = tinykv.New(tinykv.ExpirationInterval(time.Second * 30))
+	kv            = tinykv.New(time.Second * 30)
 	devMode       = false
 	defaultETag   = fmt.Sprintf("%d", time.Now().UTC().Unix())
 	defaultMaxAge = int((time.Hour * 24 * 28).Seconds())
@@ -30,7 +30,7 @@ var (
 
 // DevelopmentMode checks for expired entries every time.Millisecond * 10
 func DevelopmentMode() {
-	kv = tinykv.New(tinykv.ExpirationInterval(time.Millisecond * 10))
+	kv = tinykv.New(time.Millisecond * 10)
 	devMode = true
 }
 
@@ -94,12 +94,9 @@ func calculateETag(urlPath string, fs http.FileSystem, cco ccoptions) error {
 		// already calculating
 		return nil
 	}
-	if err := kv.CAS(calcKey, struct{}{}, func(v interface{}, pe error) bool {
-		if pe != tinykv.ErrNotFound {
-			return false
-		}
-		return true
-	}); err != nil {
+	if err := kv.Put(calcKey, struct{}{}, tinykv.CAS(func(old interface{}, found bool) bool {
+		return !found
+	})); err != nil {
 		// already calculating
 		return nil
 	}
@@ -134,12 +131,9 @@ func calculateETag(urlPath string, fs http.FileSystem, cco ccoptions) error {
 	// put inside kv
 	var etagFormat = "\"%x\""
 	etag := fmt.Sprintf(etagFormat, hash.Sum(nil))
-	kv.CAS(urlPath, etag, func(v interface{}, pe error) bool {
-		if pe != tinykv.ErrNotFound {
-			return false
-		}
-		return true
-	},
+	kv.Put(urlPath, etag, tinykv.CAS(func(v interface{}, found bool) bool {
+		return !found
+	}),
 		tinykv.ExpiresAfter(time.Second*time.Duration(cco.maxAge)))
 
 	return nil
