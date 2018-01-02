@@ -4,6 +4,7 @@ import (
 	"crypto/md5"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -83,30 +84,32 @@ func IsWeak(isWeak bool) Option {
 //-----------------------------------------------------------------------------
 
 func calculateETag(urlPath string, fs http.FileSystem, cco ccoptions) error {
-	if fs == nil || len(urlPath) == 0 {
-		return nil
+	if fs == nil {
+		return fmt.Errorf("no fs")
 	}
-
+	if len(urlPath) == 0 {
+		return fmt.Errorf("no url")
+	}
 	// check if already calculating
 	calcKey := calcPrefix + urlPath
 	_, ok := kv.Get(calcKey)
 	if ok {
 		// already calculating
-		return nil
+		return fmt.Errorf("already calculating")
 	}
 	if err := kv.Put(calcKey, struct{}{}, tinykv.CAS(func(old interface{}, found bool) bool {
 		return !found
 	})); err != nil {
 		// already calculating
-		return nil
+		return fmt.Errorf("already calculating")
 	}
 	defer kv.Delete(calcKey)
-
 	// get file
 	var f http.File
 	var err error
-	if f, err = fs.Open(strings.TrimPrefix(urlPath, cco.stripPrefix)); err != nil {
-		return nil
+	fp := strings.TrimPrefix(urlPath, cco.stripPrefix)
+	if f, err = fs.Open(fp); err != nil {
+		return fmt.Errorf("%v %v", err, fp)
 	}
 
 	// calculate etag
@@ -160,7 +163,13 @@ func CacheControl(fs http.FileSystem, options ...Option) func(http.Handler) http
 			etag, ok := kv.Get(rq.URL.Path)
 			if !ok {
 				// 1
-				go calculateETag(rq.URL.Path, fs, cco)
+				go func() {
+					err := calculateETag(rq.URL.Path, fs, cco)
+					if !devMode || err == nil {
+						return
+					}
+					log.Println("err: ", err)
+				}()
 				// 2
 				next.ServeHTTP(rw, rq)
 				return
